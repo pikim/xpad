@@ -1,4 +1,4 @@
-#/bin/sh
+#!/bin/sh
 
 # set start pattern -> first one to export
 start_pattern="dummy" # exports all captured frames
@@ -6,7 +6,8 @@ start_pattern=09883081
 
 # set stop pattern -> last one to export
 stop_pattern="dummy" # exports all captured frames
-#stop_pattern=40380800
+#stop_pattern=1000ce50b41341000_00a489a81341000_040f1b00000000 # may differ a bit
+stop_pattern=1000ce50b41341000000a489a813410000040f1b00000000
 
 # get input filename
 in_file=$1
@@ -96,7 +97,8 @@ do
     fi
 
     # handle bulk transfers
-    if [ $transfer_type -eq 3 ]; then
+#    if [ $transfer_type -eq 3 ]; then # consider bulk inputs
+    if [ $transfer_type -eq 3 ] && [ $endpoint_number -eq 4 ]; then # ignore bulk inputs
         # prepare line
         bulk_line_out=$(printf "{0x%02x, 0x%02x, 0x%02x, 0x%04x, 0x%04x, 0x%04x, \"%s\"},\n" $transfer_type $endpoint_number $request $value $index $length $data)
 
