@@ -740,6 +740,8 @@ static void xpadonew_process_packet(struct usb_xpad *xpad,
 {
 	struct input_dev *dev = xpad->dev;
 
+	dev_dbg(xpad->dev, "%s - was here.\n", __func__); // todo delete
+
 	switch (data[0]) {
 	case 0x20:
 		xpadone_process_buttons(xpad, dev, data);
@@ -1081,7 +1083,8 @@ struct xonew_cfg {
 	char* data;
 };
 
-extern struct xonew_cfg xonew_cfg[];
+#include "xonew_init.c"
+/* extern struct xonew_cfg xonew_cfg[]; */
 
 static char char2int(char input)
 {
@@ -1113,6 +1116,8 @@ static void xpad_init_xbox_onew(struct urb *urb)
 	static unsigned char bulk_data[16384]; /* observed max-length 14371 */
 	struct usb_xpad *xpad = urb->context;
 	int len, i;
+
+	dev_dbg(xpad->dev, "%s - was here.\n", __func__); // todo delete
 
 	/* process data from last frame */
 	if (pos > -1) {
@@ -1178,10 +1183,10 @@ static void xpad_init_xbox_onew(struct urb *urb)
 		}
 	}
 	else { /* this is the end */
-		usb_free_urb(xpad->ctrl_in);
+/*		usb_free_urb(xpad->ctrl_in);
 		usb_free_urb(xpad->ctrl_out);
 		usb_free_urb(xpad->bulk_in);
-		usb_free_urb(xpad->bulk_out);
+		usb_free_urb(xpad->bulk_out);*/
 	}
 
 	return true;
@@ -1191,6 +1196,8 @@ static int xpad_start_xbox_onew(struct usb_xpad *xpad)
 {
 	int error;
 
+	dev_dbg(xpad->dev, "%s - was here.\n", __func__); // todo delete
+
 	xpad->ctrl_in = usb_alloc_urb(0, GFP_KERNEL);
 	if (!xpad->ctrl_in) {
 		error = -ENOMEM;
@@ -1199,7 +1206,7 @@ static int xpad_start_xbox_onew(struct usb_xpad *xpad)
 	usb_fill_control_urb(xpad->ctrl_in, xpad->udev,
 			 usb_rcvctrlpipe(xpad->udev, 0), xpad->ctrl_isetup,
 			 xpad->ctrl_idata, 4, xpad_init_xbox_onew,
-			 xpad);
+			 xpad); /* TODO: replace hard-coded endpoint and length */
 
 	xpad->ctrl_out = usb_alloc_urb(0, GFP_KERNEL);
 	if (!xpad->ctrl_out) {
@@ -1209,7 +1216,7 @@ static int xpad_start_xbox_onew(struct usb_xpad *xpad)
 	usb_fill_control_urb(xpad->ctrl_out, xpad->udev,
 			 usb_sndctrlpipe(xpad->udev, 0), xpad->ctrl_osetup,
 			 xpad->ctrl_odata, 4, xpad_init_xbox_onew,
-			 xpad);
+			 xpad); /* TODO: replace hard-coded endpoint and length */
 
 	xpad->bulk_in = usb_alloc_urb(0, GFP_KERNEL);
 	if (!xpad->bulk_in) {
@@ -1217,9 +1224,9 @@ static int xpad_start_xbox_onew(struct usb_xpad *xpad)
 		goto err_free_urbs;
 	}
 	usb_fill_bulk_urb(xpad->bulk_in, xpad->udev,
-			 usb_rcvbulkpipe(xpad->udev, 0),
+			 usb_rcvbulkpipe(xpad->udev, 5),
 			 xpad->bulk_idata, 4, xpad_init_xbox_onew,
-			 xpad);
+			 xpad); /* TODO: replace hard-coded endpoint and length */
 
 	xpad->bulk_out = usb_alloc_urb(0, GFP_KERNEL);
 	if (!xpad->bulk_out) {
@@ -1227,9 +1234,9 @@ static int xpad_start_xbox_onew(struct usb_xpad *xpad)
 		goto err_free_urbs;
 	}
 	usb_fill_bulk_urb(xpad->bulk_out, xpad->udev,
-			 usb_sndbulkpipe(xpad->udev, 0),
+			 usb_sndbulkpipe(xpad->udev, 4),
 			 xpad->bulk_odata, 4, xpad_init_xbox_onew,
-			 xpad);
+			 xpad); /* TODO: replace hard-coded endpoint and length */
 
 	xpad_init_xbox_onew(xpad);
 
@@ -1750,6 +1757,8 @@ static int xpad_probe(struct usb_interface *intf, const struct usb_device_id *id
 	struct usb_endpoint_descriptor *ep_irq_in;
 	int ep_irq_in_idx;
 	int i, error;
+
+	dev_dbg(xpad->dev, "%s - was here.\n", __func__); // todo delete
 
 	if (intf->cur_altsetting->desc.bNumEndpoints != 2)
 		return -ENODEV;
