@@ -33,7 +33,7 @@ sed -i 's/://g' $temp_file
 
 # write C structure header to output file
 echo "struct xonew_cfg xonew_cfg[] = {" >> $out_file
-echo "/* transfer_type" >> $out_file
+echo "/* transfer_type: 0=isochronous; 1=interrupt; 2=control; 3=bulk" >> $out_file
 echo "   |     endpoint_number" >> $out_file
 echo "   |     |   request" >> $out_file
 echo "   |     |     |   value   index   length   data/ response" >> $out_file
@@ -117,7 +117,7 @@ do
 done < $temp_file
 
 # write C structure footer to output file
-echo "{-1}" >> $out_file
+echo "{-1} /* end delimiter */" >> $out_file
 echo "};" >> $out_file
 
 # delete temporary file
