@@ -135,10 +135,10 @@ static const struct xpad_device {
 	{ 0x045e, 0x02d1, "Microsoft X-Box One pad", 0, XTYPE_XBOXONE },
 	{ 0x045e, 0x02dd, "Microsoft X-Box One pad (Firmware 2015)", 0, XTYPE_XBOXONE },
 	{ 0x045e, 0x02e3, "Microsoft X-Box One Elite pad", 0, XTYPE_XBOXONE },
-	{ 0x045e, 0x02e6, "Xbox One Wireless Receiver", 0, XTYPE_XBOXONEW },
 	{ 0x045e, 0x02ea, "Microsoft X-Box One S pad", 0, XTYPE_XBOXONE },
 	{ 0x045e, 0x0291, "Xbox 360 Wireless Receiver (XBOX)", MAP_DPAD_TO_BUTTONS, XTYPE_XBOX360W },
 	{ 0x045e, 0x0719, "Xbox 360 Wireless Receiver", MAP_DPAD_TO_BUTTONS, XTYPE_XBOX360W },
+	{ 0x045e, 0x02e6, "Xbox One Wireless Receiver", 0, XTYPE_XBOXONEW },
 	{ 0x044f, 0x0f07, "Thrustmaster, Inc. Controller", 0, XTYPE_XBOX },
 	{ 0x044f, 0xb326, "Thrustmaster Gamepad GP XID", 0, XTYPE_XBOX360 },
 	{ 0x046d, 0xc21d, "Logitech Gamepad F310", 0, XTYPE_XBOX360 },
@@ -311,7 +311,7 @@ static const signed short xpad_abs_triggers[] = {
 #define XPAD_XBOXONE_VENDOR(vend) \
 	{ XPAD_XBOXONE_VENDOR_PROTOCOL(vend, 208) }
 
-/* The Xbox One Wireless Adapter uses subclass 255 and protocol 255. */
+	/* The Xbox One Wireless Adapter uses subclass 255 and protocol 255. */
 #define XPAD_XBOXONEW_VENDOR_PROTOCOL(vend, pr) \
 	.match_flags = USB_DEVICE_ID_MATCH_VENDOR | USB_DEVICE_ID_MATCH_INT_INFO, \
 	.idVendor = (vend), \
@@ -364,7 +364,7 @@ struct xpad_output_packet {
 				 IS_ENABLED(CONFIG_JOYSTICK_XPAD_LEDS))
 
 struct usb_xpad {
-	struct input_dev *dev;		/* input device interface  */
+	struct input_dev *dev;		/* input device interface */
 	struct input_dev __rcu *x360w_dev;
 	struct usb_device *udev;	/* usb device */
 	struct usb_interface *intf;	/* usb interface */
@@ -399,6 +399,7 @@ struct usb_xpad {
 	const char *name;		/* name of the device */
 	struct work_struct work;	/* init/remove device from callback */
 
+	int start_init_onew;		/* int to start the init sequence */
 	struct urb *ctrl_in;		/* urb for control in report */
 	struct urb *ctrl_out;		/* urb for control out report */
 	struct urb *bulk_in;		/* urb for bulk in report */
@@ -495,7 +496,7 @@ static void xpad_process_packet(struct usb_xpad *xpad, u16 cmd, unsigned char *d
  */
 
 static void xpad360_process_packet(struct usb_xpad *xpad, struct input_dev *dev,
-		u16 cmd, unsigned char *data)
+				   u16 cmd, unsigned char *data)
 {
 	/* valid pad data */
 	if (data[0] != 0x00)
@@ -517,7 +518,7 @@ static void xpad360_process_packet(struct usb_xpad *xpad, struct input_dev *dev,
 	 * support both behaviors.
 	 */
 	if (!(xpad->mapping & MAP_DPAD_TO_BUTTONS) ||
-			xpad->xtype == XTYPE_XBOX360W) {
+	    xpad->xtype == XTYPE_XBOX360W) {
 		input_report_abs(dev, ABS_HAT0X,
 				 !!(data[2] & 0x08) - !!(data[2] & 0x04));
 		input_report_abs(dev, ABS_HAT0Y,
@@ -576,7 +577,7 @@ static void xpad_presence_work(struct work_struct *work)
 		error = xpad_init_input(xpad);
 		if (error) {
 			/* complain only, not much else we can do here */
-			dev_err(&xpad->dev->dev,
+			dev_err(&xpad->intf->dev,
 				"unable to init device: %d\n", error);
 		} else {
 			rcu_assign_pointer(xpad->x360w_dev, xpad->dev);
@@ -749,29 +750,7 @@ static void xpadone_process_packet(struct usb_xpad *xpad,
 static void xpadonew_process_packet(struct usb_xpad *xpad,
 				u16 cmd, unsigned char *data)
 {
-	struct input_dev *dev = xpad->dev;
 
-	dev_dbg(xpad->dev, "%s - was here.\n", __func__); // todo delete
-
-	switch (data[0]) {
-	case 0x20:
-		xpadone_process_buttons(xpad, dev, data);
-		break;
-
-	case 0x07:
-		/*
-		 * The Xbox One S controller requires these reports to be
-		 * acked otherwise it continues sending them forever and
-		 * won't report further mode button events.
-		 */
-		if (data[1] == 0x30)
-			xpadone_ack_mode_report(xpad, data[2]);
-
-		/* the xbox button has its own special report */
-		input_report_key(dev, BTN_MODE, data[4] & 0x01);
-		input_sync(dev);
-		break;
-	}
 }
 
 static void xpad_irq_in(struct urb *urb)
@@ -970,7 +949,7 @@ static void xpad_stop_output(struct usb_xpad *xpad)
 {
 	if (xpad->xtype != XTYPE_UNKNOWN) {
 		if (!usb_wait_anchor_empty_timeout(&xpad->irq_out_anchor,
-				5000)) {
+						   5000)) {
 			dev_warn(&xpad->intf->dev,
 				 "timed out waiting for output URB to complete, killing\n");
 			usb_kill_anchored_urbs(&xpad->irq_out_anchor);
@@ -1095,7 +1074,6 @@ struct xonew_cfg {
 };
 
 #include "xonew_init.c"
-/* extern struct xonew_cfg xonew_cfg[]; */
 
 static char char2int(char input)
 {
@@ -1121,76 +1099,83 @@ static unsigned long hex2bytes(const char input[], unsigned char* output)
 
 static void xpad_init_xbox_onew(struct urb *urb)
 {
-	static int pos = -1; /* minus one for first frame */
+	static int idx; /* to address the init config array */
 	static unsigned char ctrl_data[64]; /* received control data, observed max-length 36 */
 	static unsigned char ctrl_exp_data[64]; /* expected control data, observed max-length 36 */
 	static unsigned char bulk_data[16384]; /* observed max-length 14371 */
 	struct usb_xpad *xpad = urb->context;
 	int len, i;
 
-	dev_dbg(xpad->dev, "%s - was here.\n", __func__); // todo delete
+	if (xpad->start_init_onew != 0) {
+		xpad->start_init_onew = 0;
+		idx = -1; /* minus one for first frame */
+	}
 
 	/* process data from last frame */
-	if (pos > -1) {
+	if (idx > -1) {
 		/* check if received data matches expected data */
-		if (PIPE_CONTROL == xonew_cfg[pos].transfer_type) { /* control transfer */
-			if (USB_DIR_IN & xonew_cfg[pos].endpoint) { /* in */
-				len = hex2bytes(xonew_cfg[pos].data, ctrl_exp_data);
+		if (PIPE_CONTROL == xonew_cfg[idx].transfer_type) { /* control transfer */
+			if (USB_DIR_IN & xonew_cfg[idx].endpoint) { /* in */
+				len = hex2bytes(xonew_cfg[idx].data, ctrl_exp_data);
 
 				for (i = 0; i < len; i++) {
 					if (ctrl_exp_data[i] != ctrl_data[i]) {
-						dev_dbg(xpad->dev, "%s - expected control value did not match. Expected: %s; Received: %s.\n",
+						dev_info(&xpad->intf->dev,
+								"%s - expected control value did not match. Expected: %s; Received: %s.\n",
 								__func__, ctrl_exp_data, ctrl_data);
-						return false;
 					}
 				}
 			}
 		}
 	}
 
-	pos++;
+	idx++;
+
+	if (idx > 0) return;
 
 	/* prepare and send next frame */
-	if (PIPE_CONTROL == xonew_cfg[pos].transfer_type) { /* control transfer */
-		if (USB_DIR_IN & xonew_cfg[pos].endpoint) { /* in */
+	if (PIPE_CONTROL == xonew_cfg[idx].transfer_type) { /* control transfer */
+		if (USB_DIR_IN & xonew_cfg[idx].endpoint) { /* in */
+printk(KERN_ERR "err_free_urbs 3\n");
 			xpad->ctrl_isetup[0] = USB_DIR_IN | USB_TYPE_VENDOR;
-			xpad->ctrl_isetup[1] = xonew_cfg[pos].request;
-			xpad->ctrl_isetup[2] = xonew_cfg[pos].value;
-			xpad->ctrl_isetup[3] = xonew_cfg[pos].value >> 8;
-			xpad->ctrl_isetup[4] = xonew_cfg[pos].index;
-			xpad->ctrl_isetup[5] = xonew_cfg[pos].index >> 8;
-			xpad->ctrl_isetup[6] = xonew_cfg[pos].length;
-			xpad->ctrl_isetup[7] = xonew_cfg[pos].length >> 8;
+			xpad->ctrl_isetup[1] = xonew_cfg[idx].request;
+			xpad->ctrl_isetup[2] = xonew_cfg[idx].value;
+			xpad->ctrl_isetup[3] = xonew_cfg[idx].value >> 8;
+			xpad->ctrl_isetup[4] = xonew_cfg[idx].index;
+			xpad->ctrl_isetup[5] = xonew_cfg[idx].index >> 8;
+			xpad->ctrl_isetup[6] = xonew_cfg[idx].length;
+			xpad->ctrl_isetup[7] = xonew_cfg[idx].length >> 8;
 			xpad->ctrl_idata = ctrl_data;
-			if (usb_submit_urb(xpad->ctrl_in, GFP_KERNEL))
-				return -EIO;
+printk(KERN_ERR "err_free_urbs 5\n");
+// 			if (usb_submit_urb(xpad->ctrl_in, GFP_KERNEL))
+// 				dev_err(&xpad->intf->dev, "%s - IO error.\n", __func__);
 		}
 		else { /* out */
-			len = hex2bytes(xonew_cfg[pos].data, ctrl_data);
+			len = hex2bytes(xonew_cfg[idx].data, ctrl_data);
 
 			xpad->ctrl_osetup[0] = USB_DIR_OUT | USB_TYPE_VENDOR;
-			xpad->ctrl_osetup[1] = xonew_cfg[pos].request;
-			xpad->ctrl_osetup[2] = xonew_cfg[pos].value;
-			xpad->ctrl_osetup[3] = xonew_cfg[pos].value >> 8;
-			xpad->ctrl_osetup[4] = xonew_cfg[pos].index;
-			xpad->ctrl_osetup[5] = xonew_cfg[pos].index >> 8;
-			xpad->ctrl_osetup[6] = xonew_cfg[pos].length;
-			xpad->ctrl_osetup[7] = xonew_cfg[pos].length >> 8;
+			xpad->ctrl_osetup[1] = xonew_cfg[idx].request;
+			xpad->ctrl_osetup[2] = xonew_cfg[idx].value;
+			xpad->ctrl_osetup[3] = xonew_cfg[idx].value >> 8;
+			xpad->ctrl_osetup[4] = xonew_cfg[idx].index;
+			xpad->ctrl_osetup[5] = xonew_cfg[idx].index >> 8;
+			xpad->ctrl_osetup[6] = xonew_cfg[idx].length;
+			xpad->ctrl_osetup[7] = xonew_cfg[idx].length >> 8;
 			xpad->ctrl_odata = ctrl_data;
-			if (usb_submit_urb(xpad->ctrl_out, GFP_KERNEL))
-				return -EIO;
+// 			if (usb_submit_urb(xpad->ctrl_out, GFP_KERNEL))
+// 				dev_err(&xpad->intf->dev, "%s - IO error.\n", __func__);
 		}
 	}
-	else if (PIPE_BULK == xonew_cfg[pos].transfer_type) { /* bulk transfer */
-		if (USB_DIR_IN & xonew_cfg[pos].endpoint) { /* in */
+	else if (PIPE_BULK == xonew_cfg[idx].transfer_type) { /* bulk transfer */
+		if (USB_DIR_IN & xonew_cfg[idx].endpoint) { /* in */
 			/* nothing to do here */
 		}
 		else { /* out */
-			len = hex2bytes(xonew_cfg[pos].data, bulk_data);
+			len = hex2bytes(xonew_cfg[idx].data, bulk_data);
 
 			xpad->bulk_odata = bulk_data;
-			if (usb_submit_urb(xpad->bulk_out, GFP_KERNEL))
-				return -EIO;
+// 			if (usb_submit_urb(xpad->bulk_out, GFP_KERNEL))
+// 				dev_err(&xpad->intf->dev, "%s - IO error.\n", __func__);
 		}
 	}
 	else { /* this is the end */
@@ -1199,15 +1184,11 @@ static void xpad_init_xbox_onew(struct urb *urb)
 		usb_free_urb(xpad->bulk_in);
 		usb_free_urb(xpad->bulk_out);*/
 	}
-
-	return true;
 }
 
 static int xpad_start_xbox_onew(struct usb_xpad *xpad)
 {
 	int error;
-
-	dev_dbg(xpad->dev, "%s - was here.\n", __func__); // todo delete
 
 	xpad->ctrl_in = usb_alloc_urb(0, GFP_KERNEL);
 	if (!xpad->ctrl_in) {
@@ -1249,17 +1230,16 @@ static int xpad_start_xbox_onew(struct usb_xpad *xpad)
 			 xpad->bulk_odata, 4, xpad_init_xbox_onew,
 			 xpad); /* TODO: replace hard-coded endpoint and length */
 
-	xpad_init_xbox_onew(xpad);
+	xpad_init_xbox_onew(xpad->ctrl_in);
+	return 0;
 
 err_free_urbs:
 	usb_free_urb(xpad->ctrl_in);
 	usb_free_urb(xpad->ctrl_out);
 	usb_free_urb(xpad->bulk_in);
 	usb_free_urb(xpad->bulk_out);
-//	usb_free_coherent(udev, XPAD_PKT_LEN, xpad->idata, xpad->idata_dma);
-fail:
-	dev_dbg(xpad->dev, "%s - initialization failed.\n",	__func__);
-	return false;
+	dev_err(&xpad->intf->dev, "%s - err_free_urbs.\n", __func__);
+	return error;
 }
 
 #ifdef CONFIG_JOYSTICK_XPAD_FF
@@ -1340,9 +1320,8 @@ static int xpad_play_effect(struct input_dev *dev, void *data, struct ff_effect 
 		packet->pending = true;
 		break;
 
-	case XTYPE_XBOXONEW:
 	default:
-		dev_dbg(&xpad->dev->dev,
+		dev_dbg(&xpad->intf->dev,
 			"%s - rumble command sent to unsupported xpad type: %d\n",
 			__func__, xpad->xtype);
 		retval = -EINVAL;
@@ -1523,8 +1502,10 @@ static int xpad_start_input(struct usb_xpad *xpad)
 {
 	int error;
 
-	if (usb_submit_urb(xpad->irq_in, GFP_KERNEL))
-		return -EIO;
+	if (xpad->xtype != XTYPE_XBOXONEW) {
+		if (usb_submit_urb(xpad->irq_in, GFP_KERNEL))
+			return -EIO;
+	}
 
 	if (xpad->xtype == XTYPE_XBOXONE) {
 		error = xpad_start_xbox_one(xpad);
@@ -1535,9 +1516,14 @@ static int xpad_start_input(struct usb_xpad *xpad)
 	}
 
 	if (xpad->xtype == XTYPE_XBOXONEW) {
+		xpad->start_init_onew = 1;
 		error = xpad_start_xbox_onew(xpad);
 		if (error) {
-			usb_kill_urb(xpad->irq_in);
+			/* xpad->irq_in not used wirelessly */
+			usb_kill_urb(xpad->ctrl_in);
+			usb_kill_urb(xpad->ctrl_out);
+			usb_kill_urb(xpad->bulk_in);
+			usb_kill_urb(xpad->bulk_out);
 			return error;
 		}
 	}
@@ -1548,6 +1534,10 @@ static int xpad_start_input(struct usb_xpad *xpad)
 static void xpad_stop_input(struct usb_xpad *xpad)
 {
 	usb_kill_urb(xpad->irq_in);
+	usb_kill_urb(xpad->ctrl_in);
+	usb_kill_urb(xpad->ctrl_out);
+	usb_kill_urb(xpad->bulk_in);
+	usb_kill_urb(xpad->bulk_out);
 }
 
 static void xpad360w_poweroff_controller(struct usb_xpad *xpad)
@@ -1704,7 +1694,7 @@ static int xpad_init_input(struct usb_xpad *xpad)
 
 	/* set up model-specific ones */
 	if (xpad->xtype == XTYPE_XBOX360 || xpad->xtype == XTYPE_XBOX360W ||
-			xpad->xtype == XTYPE_XBOXONE) {
+	    xpad->xtype == XTYPE_XBOXONE) {
 		for (i = 0; xpad360_btn[i] >= 0; i++)
 			__set_bit(xpad360_btn[i], input_dev->keybit);
 	} else {
@@ -1724,7 +1714,7 @@ static int xpad_init_input(struct usb_xpad *xpad)
 	 * support both behaviors.
 	 */
 	if (!(xpad->mapping & MAP_DPAD_TO_BUTTONS) ||
-			xpad->xtype == XTYPE_XBOX360W) {
+	    xpad->xtype == XTYPE_XBOX360W) {
 		for (i = 0; xpad_abs_pad[i] >= 0; i++)
 			xpad_set_up_abs(input_dev, xpad_abs_pad[i]);
 	}
@@ -1754,10 +1744,13 @@ static int xpad_init_input(struct usb_xpad *xpad)
 
 err_disconnect_led:
 	xpad_led_disconnect(xpad);
+ 	dev_err(&xpad->intf->dev, "%s - err_disconnect_led.\n", __func__);
 err_destroy_ff:
 	input_ff_destroy(input_dev);
+ 	dev_err(&xpad->intf->dev, "%s - err_destroy_ff.\n", __func__);
 err_free_input:
 	input_free_device(input_dev);
+ 	dev_err(&xpad->intf->dev, "%s - err_free_input.\n", __func__);
 	return error;
 }
 
@@ -1769,14 +1762,12 @@ static int xpad_probe(struct usb_interface *intf, const struct usb_device_id *id
 	int ep_irq_in_idx;
 	int i, error;
 
-	dev_dbg(xpad->dev, "%s - was here.\n", __func__); // todo delete
-
-	if (intf->cur_altsetting->desc.bNumEndpoints != 2)
+	if (intf->cur_altsetting->desc.bNumEndpoints < 2)
 		return -ENODEV;
 
 	for (i = 0; xpad_device[i].idVendor; i++) {
 		if ((le16_to_cpu(udev->descriptor.idVendor) == xpad_device[i].idVendor) &&
-			(le16_to_cpu(udev->descriptor.idProduct) == xpad_device[i].idProduct))
+		    (le16_to_cpu(udev->descriptor.idProduct) == xpad_device[i].idProduct))
 			break;
 	}
 
@@ -1830,7 +1821,7 @@ static int xpad_probe(struct usb_interface *intf, const struct usb_device_id *id
 	}
 
 	if (xpad->xtype == XTYPE_XBOXONE &&
-			intf->cur_altsetting->desc.bInterfaceNumber != 0) {
+	    intf->cur_altsetting->desc.bInterfaceNumber != 0) {
 		/*
 		 * The Xbox One controller lists three interfaces all with the
 		 * same interface class, subclass and protocol. Differentiate by
@@ -1848,12 +1839,15 @@ static int xpad_probe(struct usb_interface *intf, const struct usb_device_id *id
 	ep_irq_in_idx = xpad->xtype == XTYPE_XBOXONE ? 1 : 0;
 	ep_irq_in = &intf->cur_altsetting->endpoint[ep_irq_in_idx].desc;
 
-	usb_fill_int_urb(xpad->irq_in, udev,
-			 usb_rcvintpipe(udev, ep_irq_in->bEndpointAddress),
-			 xpad->idata, XPAD_PKT_LEN, xpad_irq_in,
-			 xpad, ep_irq_in->bInterval);
-	xpad->irq_in->transfer_dma = xpad->idata_dma;
-	xpad->irq_in->transfer_flags |= URB_NO_TRANSFER_DMA_MAP;
+	if ((ep_irq_in->bEndpointAddress & USB_DIR_IN) &&
+		(ep_irq_in->bmAttributes & USB_ENDPOINT_XFERTYPE_MASK == USB_ENDPOINT_XFER_INT)) {
+		usb_fill_int_urb(xpad->irq_in, udev,
+				 usb_rcvintpipe(udev, ep_irq_in->bEndpointAddress),
+				 xpad->idata, XPAD_PKT_LEN, xpad_irq_in,
+				 xpad, ep_irq_in->bInterval);
+		xpad->irq_in->transfer_dma = xpad->idata_dma;
+		xpad->irq_in->transfer_flags |= URB_NO_TRANSFER_DMA_MAP;
+	}
 
 	usb_set_intfdata(intf, xpad);
 
@@ -1895,14 +1889,23 @@ static int xpad_probe(struct usb_interface *intf, const struct usb_device_id *id
 
 err_deinit_input:
 	xpad_deinit_input(xpad);
+ 	dev_err(&xpad->intf->dev, "%s - err_deinit_input.\n", __func__);
 err_deinit_output:
 	xpad_deinit_output(xpad);
+ 	dev_err(&xpad->intf->dev, "%s - err_deinit_output.\n", __func__);
 err_free_in_urb:
 	usb_free_urb(xpad->irq_in);
+	usb_free_urb(xpad->ctrl_in);
+	usb_free_urb(xpad->ctrl_out);
+	usb_free_urb(xpad->bulk_in);
+	usb_free_urb(xpad->bulk_out);
+ 	dev_err(&xpad->intf->dev, "%s - err_free_in_urb.\n", __func__);
 err_free_idata:
 	usb_free_coherent(udev, XPAD_PKT_LEN, xpad->idata, xpad->idata_dma);
+ 	dev_err(&xpad->intf->dev, "%s - err_free_idata.\n", __func__);
 err_free_mem:
 	kfree(xpad);
+ 	dev_err(&xpad->intf->dev, "%s - err_free_mem.\n", __func__);
 	return error;
 }
 
@@ -1928,6 +1931,11 @@ static void xpad_disconnect(struct usb_interface *intf)
 	usb_free_urb(xpad->irq_in);
 	usb_free_coherent(xpad->udev, XPAD_PKT_LEN,
 			xpad->idata, xpad->idata_dma);
+
+	usb_free_urb(xpad->ctrl_in);
+	usb_free_urb(xpad->ctrl_out);
+	usb_free_urb(xpad->bulk_in);
+	usb_free_urb(xpad->bulk_out);
 
 	kfree(xpad);
 
@@ -1958,7 +1966,7 @@ static int xpad_suspend(struct usb_interface *intf, pm_message_t message)
 	} else {
 		mutex_lock(&input->mutex);
 		if (input->users ||
-				xpad->xtype == XTYPE_XBOXONE || xpad->xtype == XTYPE_XBOXONEW)
+		    xpad->xtype == XTYPE_XBOXONE || xpad->xtype == XTYPE_XBOXONEW)
 			xpad_stop_input(xpad);
 		mutex_unlock(&input->mutex);
 	}
@@ -1979,7 +1987,7 @@ static int xpad_resume(struct usb_interface *intf)
 	} else {
 		mutex_lock(&input->mutex);
 		if (input->users ||
-				xpad->xtype == XTYPE_XBOXONE || xpad->xtype == XTYPE_XBOXONEW)
+		    xpad->xtype == XTYPE_XBOXONE || xpad->xtype == XTYPE_XBOXONEW)
 			retval = xpad_start_input(xpad);
 		mutex_unlock(&input->mutex);
 	}
