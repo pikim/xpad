@@ -405,11 +405,15 @@ struct usb_xpad {
 	struct urb *bulk_in;		/* urb for bulk in report */
 	struct urb *bulk_out;		/* urb for bulk out report */
 	unsigned char *ctrl_idata;		/* control input data */
+	dma_addr_t ctrl_idata_dma;
 	unsigned char *ctrl_odata;		/* control output data */
+	dma_addr_t ctrl_odata_dma;
 	unsigned char *bulk_idata;		/* bulk input data */
+	dma_addr_t bulk_idata_dma;
 	unsigned char *bulk_odata;		/* bulk output data */
-	unsigned char ctrl_isetup[8];		/* control input setup packet */
-	unsigned char ctrl_osetup[8];		/* control output setup packet */
+	dma_addr_t bulk_odata_dma;
+	struct usb_ctrlrequest *ctrl_isetup;	/* control input setup packet */
+	struct usb_ctrlrequest *ctrl_osetup;	/* control output setup packet */
 };
 
 static int xpad_init_input(struct usb_xpad *xpad);
@@ -1074,6 +1078,8 @@ struct xonew_cfg {
 };
 
 #include "xonew_init.c"
+#define XONEW_CTRL_LEN 0x4
+#define XONEW_BULK_LEN 0x4000
 
 static char char2int(char input)
 {
@@ -1100,15 +1106,21 @@ static unsigned long hex2bytes(const char input[], unsigned char* output)
 static void xpad_init_xbox_onew(struct urb *urb)
 {
 	static int idx; /* to address the init config array */
-	static unsigned char ctrl_data[64]; /* received control data, observed max-length 36 */
 	static unsigned char ctrl_exp_data[64]; /* expected control data, observed max-length 36 */
-	static unsigned char bulk_data[16384]; /* observed max-length 14371 */
 	struct usb_xpad *xpad = urb->context;
 	int len, i;
 
 	if (xpad->start_init_onew != 0) {
 		xpad->start_init_onew = 0;
 		idx = -1; /* minus one for first frame */
+	}
+
+	if (urb->status &&
+		!(urb->status == -ENOENT ||
+		  urb->status == -ECONNRESET ||
+		  urb->status == -ESHUTDOWN)) {
+		dev_dbg("%s - nonzero write bulk status received: %d",
+		__func__, urb->status);
 	}
 
 	/* process data from last frame */
@@ -1119,10 +1131,10 @@ static void xpad_init_xbox_onew(struct urb *urb)
 				len = hex2bytes(xonew_cfg[idx].data, ctrl_exp_data);
 
 				for (i = 0; i < len; i++) {
-					if (ctrl_exp_data[i] != ctrl_data[i]) {
+					if (ctrl_exp_data[i] != xpad->ctrl_idata[i]) {
 						dev_info(&xpad->intf->dev,
 								"%s - expected control value did not match. Expected: %s; Received: %s.\n",
-								__func__, ctrl_exp_data, ctrl_data);
+								__func__, ctrl_exp_data, xpad->ctrl_idata);
 					}
 				}
 			}
@@ -1130,40 +1142,33 @@ static void xpad_init_xbox_onew(struct urb *urb)
 	}
 
 	idx++;
+printk(KERN_ERR "init callback\n");
 
-	if (idx > 0) return;
+	if (idx > 2) return;
 
 	/* prepare and send next frame */
 	if (PIPE_CONTROL == xonew_cfg[idx].transfer_type) { /* control transfer */
 		if (USB_DIR_IN & xonew_cfg[idx].endpoint) { /* in */
-printk(KERN_ERR "err_free_urbs 3\n");
-			xpad->ctrl_isetup[0] = USB_DIR_IN | USB_TYPE_VENDOR;
-			xpad->ctrl_isetup[1] = xonew_cfg[idx].request;
-			xpad->ctrl_isetup[2] = xonew_cfg[idx].value;
-			xpad->ctrl_isetup[3] = xonew_cfg[idx].value >> 8;
-			xpad->ctrl_isetup[4] = xonew_cfg[idx].index;
-			xpad->ctrl_isetup[5] = xonew_cfg[idx].index >> 8;
-			xpad->ctrl_isetup[6] = xonew_cfg[idx].length;
-			xpad->ctrl_isetup[7] = xonew_cfg[idx].length >> 8;
-			xpad->ctrl_idata = ctrl_data;
-printk(KERN_ERR "err_free_urbs 5\n");
-// 			if (usb_submit_urb(xpad->ctrl_in, GFP_KERNEL))
-// 				dev_err(&xpad->intf->dev, "%s - IO error.\n", __func__);
+printk(KERN_ERR "control in\n");
+			xpad->ctrl_isetup->bRequestType = USB_DIR_IN | USB_TYPE_VENDOR;
+			xpad->ctrl_isetup->bRequest = xonew_cfg[idx].request;
+			xpad->ctrl_isetup->wValue = xonew_cfg[idx].value;
+			xpad->ctrl_isetup->wIndex = xonew_cfg[idx].index;
+			xpad->ctrl_isetup->wLength = xonew_cfg[idx].length;
+			if (usb_submit_urb(xpad->ctrl_in, GFP_ATOMIC))
+				dev_err(&xpad->intf->dev, "%s - IO error.\n", __func__);
 		}
 		else { /* out */
-			len = hex2bytes(xonew_cfg[idx].data, ctrl_data);
+			len = hex2bytes(xonew_cfg[idx].data, xpad->ctrl_odata);
 
-			xpad->ctrl_osetup[0] = USB_DIR_OUT | USB_TYPE_VENDOR;
-			xpad->ctrl_osetup[1] = xonew_cfg[idx].request;
-			xpad->ctrl_osetup[2] = xonew_cfg[idx].value;
-			xpad->ctrl_osetup[3] = xonew_cfg[idx].value >> 8;
-			xpad->ctrl_osetup[4] = xonew_cfg[idx].index;
-			xpad->ctrl_osetup[5] = xonew_cfg[idx].index >> 8;
-			xpad->ctrl_osetup[6] = xonew_cfg[idx].length;
-			xpad->ctrl_osetup[7] = xonew_cfg[idx].length >> 8;
-			xpad->ctrl_odata = ctrl_data;
-// 			if (usb_submit_urb(xpad->ctrl_out, GFP_KERNEL))
-// 				dev_err(&xpad->intf->dev, "%s - IO error.\n", __func__);
+printk(KERN_ERR "control out\n");
+			xpad->ctrl_osetup->bRequestType = USB_DIR_OUT | USB_TYPE_VENDOR;
+			xpad->ctrl_osetup->bRequest = xonew_cfg[idx].request;
+			xpad->ctrl_osetup->wValue = xonew_cfg[idx].value;
+			xpad->ctrl_osetup->wIndex = xonew_cfg[idx].index;
+			xpad->ctrl_osetup->wLength = xonew_cfg[idx].length;
+			if (usb_submit_urb(xpad->ctrl_out, GFP_ATOMIC))
+				dev_err(&xpad->intf->dev, "%s - IO error.\n", __func__);
 		}
 	}
 	else if (PIPE_BULK == xonew_cfg[idx].transfer_type) { /* bulk transfer */
@@ -1171,10 +1176,9 @@ printk(KERN_ERR "err_free_urbs 5\n");
 			/* nothing to do here */
 		}
 		else { /* out */
-			len = hex2bytes(xonew_cfg[idx].data, bulk_data);
+			len = hex2bytes(xonew_cfg[idx].data, xpad->bulk_odata);
 
-			xpad->bulk_odata = bulk_data;
-// 			if (usb_submit_urb(xpad->bulk_out, GFP_KERNEL))
+// 			if (usb_submit_urb(xpad->bulk_out, GFP_ATOMIC))
 // 				dev_err(&xpad->intf->dev, "%s - IO error.\n", __func__);
 		}
 	}
@@ -1190,45 +1194,101 @@ static int xpad_start_xbox_onew(struct usb_xpad *xpad)
 {
 	int error;
 
-	xpad->ctrl_in = usb_alloc_urb(0, GFP_KERNEL);
+	/* ---------- CONTROL IN ENDPOINT ---------- */
+	/* allocate memory for setup */
+	xpad->ctrl_isetup = kmalloc(sizeof(struct usb_ctrlrequest), GFP_KERNEL);
+	if (!xpad->ctrl_isetup) {
+		error = -ENOMEM;
+		goto err_free_mem;
+	}
+	/* allocate memory for data */
+	xpad->ctrl_idata = usb_alloc_coherent(xpad->udev, XONEW_CTRL_LEN,
+					 GFP_ATOMIC, &xpad->ctrl_idata_dma);
+	if (!xpad->ctrl_idata) {
+		error = -ENOMEM;
+		goto err_free_mem;
+	}
+	/* allocate urb */
+	xpad->ctrl_in = usb_alloc_urb(0, GFP_ATOMIC);
 	if (!xpad->ctrl_in) {
 		error = -ENOMEM;
 		goto err_free_urbs;
 	}
-	usb_fill_control_urb(xpad->ctrl_in, xpad->udev,
-			 usb_rcvctrlpipe(xpad->udev, 0), xpad->ctrl_isetup,
-			 xpad->ctrl_idata, 4, xpad_init_xbox_onew,
-			 xpad); /* TODO: replace hard-coded endpoint and length */
+	/* setup urb */
+	usb_fill_control_urb(xpad->ctrl_in, xpad->udev, usb_rcvctrlpipe(xpad->udev, 0),
+			 (void *)xpad->ctrl_isetup, xpad->ctrl_idata, XONEW_CTRL_LEN,
+			 xpad_init_xbox_onew, xpad); /* TODO: replace hard-coded endpoint */
+	xpad->ctrl_in->transfer_dma = xpad->ctrl_idata_dma;
+	xpad->ctrl_in->transfer_flags |= URB_NO_TRANSFER_DMA_MAP;
 
-	xpad->ctrl_out = usb_alloc_urb(0, GFP_KERNEL);
+	/* ---------- CONTROL OUT ENDPOINT ---------- */
+	/* allocate memory for setup */
+	xpad->ctrl_osetup = kmalloc(sizeof(struct usb_ctrlrequest), GFP_KERNEL);
+	if (!xpad->ctrl_osetup) {
+		error = -ENOMEM;
+		goto err_free_mem;
+	}
+	/* allocate memory for data */
+	xpad->ctrl_odata = usb_alloc_coherent(xpad->udev, XONEW_CTRL_LEN,
+					 GFP_ATOMIC, &xpad->ctrl_odata_dma);
+	if (!xpad->ctrl_odata) {
+		error = -ENOMEM;
+		goto err_free_mem;
+	}
+	/* allocate urb */
+	xpad->ctrl_out = usb_alloc_urb(0, GFP_ATOMIC);
 	if (!xpad->ctrl_out) {
 		error = -ENOMEM;
 		goto err_free_urbs;
 	}
-	usb_fill_control_urb(xpad->ctrl_out, xpad->udev,
-			 usb_sndctrlpipe(xpad->udev, 0), xpad->ctrl_osetup,
-			 xpad->ctrl_odata, 4, xpad_init_xbox_onew,
-			 xpad); /* TODO: replace hard-coded endpoint and length */
+	/* setup urb */
+	usb_fill_control_urb(xpad->ctrl_out, xpad->udev, usb_sndctrlpipe(xpad->udev, 0),
+			 (void *)xpad->ctrl_osetup, xpad->ctrl_odata, XONEW_CTRL_LEN,
+			 xpad_init_xbox_onew, xpad); /* TODO: replace hard-coded endpoint */
+	xpad->ctrl_out->transfer_dma = xpad->ctrl_odata_dma;
+	xpad->ctrl_out->transfer_flags |= URB_NO_TRANSFER_DMA_MAP;
 
-	xpad->bulk_in = usb_alloc_urb(0, GFP_KERNEL);
+	/* ---------- BULK IN ENDPOINT ---------- */
+	/* allocate memory */
+	xpad->bulk_idata = usb_alloc_coherent(xpad->udev, XONEW_BULK_LEN,
+					 GFP_ATOMIC, &xpad->bulk_idata_dma);
+	if (!xpad->bulk_idata) {
+		error = -ENOMEM;
+		goto err_free_mem;
+	}
+	/* allocate urb */
+	xpad->bulk_in = usb_alloc_urb(0, GFP_ATOMIC);
 	if (!xpad->bulk_in) {
 		error = -ENOMEM;
 		goto err_free_urbs;
 	}
-	usb_fill_bulk_urb(xpad->bulk_in, xpad->udev,
-			 usb_rcvbulkpipe(xpad->udev, 5),
-			 xpad->bulk_idata, 4, xpad_init_xbox_onew,
-			 xpad); /* TODO: replace hard-coded endpoint and length */
+	/* setup urb */
+	usb_fill_bulk_urb(xpad->bulk_in, xpad->udev, usb_rcvbulkpipe(xpad->udev, 5),
+			 xpad->bulk_idata, XONEW_BULK_LEN,
+			 xpad_init_xbox_onew, xpad); /* TODO: replace hard-coded endpoint */
+	xpad->bulk_in->transfer_dma = xpad->bulk_idata_dma;
+	xpad->bulk_in->transfer_flags |= URB_NO_TRANSFER_DMA_MAP;
 
-	xpad->bulk_out = usb_alloc_urb(0, GFP_KERNEL);
+	/* ---------- BULK OUT ENDPOINT ---------- */
+	/* allocate memory */
+	xpad->bulk_odata = usb_alloc_coherent(xpad->udev, XONEW_BULK_LEN,
+					 GFP_ATOMIC, &xpad->bulk_odata_dma);
+	if (!xpad->bulk_odata) {
+		error = -ENOMEM;
+		goto err_free_mem;
+	}
+	/* allocate urb */
+	xpad->bulk_out = usb_alloc_urb(0, GFP_ATOMIC);
 	if (!xpad->bulk_out) {
 		error = -ENOMEM;
 		goto err_free_urbs;
 	}
-	usb_fill_bulk_urb(xpad->bulk_out, xpad->udev,
-			 usb_sndbulkpipe(xpad->udev, 4),
-			 xpad->bulk_odata, 4, xpad_init_xbox_onew,
-			 xpad); /* TODO: replace hard-coded endpoint and length */
+	/* setup urb */
+	usb_fill_bulk_urb(xpad->bulk_out, xpad->udev, usb_sndbulkpipe(xpad->udev, 4),
+			 xpad->bulk_odata, XONEW_BULK_LEN,
+			 xpad_init_xbox_onew, xpad); /* TODO: replace hard-coded endpoint */
+	xpad->bulk_out->transfer_dma = xpad->bulk_odata_dma;
+	xpad->bulk_out->transfer_flags |= URB_NO_TRANSFER_DMA_MAP;
 
 	xpad_init_xbox_onew(xpad->ctrl_in);
 	return 0;
@@ -1239,6 +1299,14 @@ err_free_urbs:
 	usb_free_urb(xpad->bulk_in);
 	usb_free_urb(xpad->bulk_out);
 	dev_err(&xpad->intf->dev, "%s - err_free_urbs.\n", __func__);
+err_free_mem:
+	kfree(xpad->ctrl_isetup);
+	kfree(xpad->ctrl_osetup);
+	usb_free_coherent(xpad->udev, XONEW_CTRL_LEN, xpad->ctrl_idata, xpad->ctrl_idata_dma);
+	usb_free_coherent(xpad->udev, XONEW_CTRL_LEN, xpad->ctrl_odata, xpad->ctrl_odata_dma);
+	usb_free_coherent(xpad->udev, XONEW_BULK_LEN, xpad->bulk_idata, xpad->bulk_idata_dma);
+	usb_free_coherent(xpad->udev, XONEW_BULK_LEN, xpad->bulk_odata, xpad->bulk_odata_dma);
+	dev_err(&xpad->intf->dev, "%s - err_free_mem.\n", __func__);
 	return error;
 }
 
@@ -1744,13 +1812,13 @@ static int xpad_init_input(struct usb_xpad *xpad)
 
 err_disconnect_led:
 	xpad_led_disconnect(xpad);
- 	dev_err(&xpad->intf->dev, "%s - err_disconnect_led.\n", __func__);
+	dev_err(&xpad->intf->dev, "%s - err_disconnect_led.\n", __func__);
 err_destroy_ff:
 	input_ff_destroy(input_dev);
- 	dev_err(&xpad->intf->dev, "%s - err_destroy_ff.\n", __func__);
+	dev_err(&xpad->intf->dev, "%s - err_destroy_ff.\n", __func__);
 err_free_input:
 	input_free_device(input_dev);
- 	dev_err(&xpad->intf->dev, "%s - err_free_input.\n", __func__);
+	dev_err(&xpad->intf->dev, "%s - err_free_input.\n", __func__);
 	return error;
 }
 
@@ -1840,7 +1908,7 @@ static int xpad_probe(struct usb_interface *intf, const struct usb_device_id *id
 	ep_irq_in = &intf->cur_altsetting->endpoint[ep_irq_in_idx].desc;
 
 	if ((ep_irq_in->bEndpointAddress & USB_DIR_IN) &&
-		(ep_irq_in->bmAttributes & USB_ENDPOINT_XFERTYPE_MASK == USB_ENDPOINT_XFER_INT)) {
+		((ep_irq_in->bmAttributes & USB_ENDPOINT_XFERTYPE_MASK) == USB_ENDPOINT_XFER_INT)) {
 		usb_fill_int_urb(xpad->irq_in, udev,
 				 usb_rcvintpipe(udev, ep_irq_in->bEndpointAddress),
 				 xpad->idata, XPAD_PKT_LEN, xpad_irq_in,
@@ -1889,23 +1957,29 @@ static int xpad_probe(struct usb_interface *intf, const struct usb_device_id *id
 
 err_deinit_input:
 	xpad_deinit_input(xpad);
- 	dev_err(&xpad->intf->dev, "%s - err_deinit_input.\n", __func__);
+	dev_err(&xpad->intf->dev, "%s - err_deinit_input.\n", __func__);
 err_deinit_output:
 	xpad_deinit_output(xpad);
- 	dev_err(&xpad->intf->dev, "%s - err_deinit_output.\n", __func__);
+	dev_err(&xpad->intf->dev, "%s - err_deinit_output.\n", __func__);
 err_free_in_urb:
 	usb_free_urb(xpad->irq_in);
 	usb_free_urb(xpad->ctrl_in);
 	usb_free_urb(xpad->ctrl_out);
 	usb_free_urb(xpad->bulk_in);
 	usb_free_urb(xpad->bulk_out);
- 	dev_err(&xpad->intf->dev, "%s - err_free_in_urb.\n", __func__);
+	dev_err(&xpad->intf->dev, "%s - err_free_in_urb.\n", __func__);
 err_free_idata:
+	kfree(xpad->ctrl_isetup);
+	kfree(xpad->ctrl_osetup);
 	usb_free_coherent(udev, XPAD_PKT_LEN, xpad->idata, xpad->idata_dma);
- 	dev_err(&xpad->intf->dev, "%s - err_free_idata.\n", __func__);
+	usb_free_coherent(udev, XONEW_CTRL_LEN, xpad->ctrl_idata, xpad->ctrl_idata_dma);
+	usb_free_coherent(udev, XONEW_CTRL_LEN, xpad->ctrl_odata, xpad->ctrl_odata_dma);
+	usb_free_coherent(udev, XONEW_BULK_LEN, xpad->bulk_idata, xpad->bulk_idata_dma);
+	usb_free_coherent(udev, XONEW_BULK_LEN, xpad->bulk_odata, xpad->bulk_odata_dma);
+	dev_err(&xpad->intf->dev, "%s - err_free_idata.\n", __func__);
 err_free_mem:
 	kfree(xpad);
- 	dev_err(&xpad->intf->dev, "%s - err_free_mem.\n", __func__);
+	dev_err(&xpad->intf->dev, "%s - err_free_mem.\n", __func__);
 	return error;
 }
 
@@ -1929,13 +2003,18 @@ static void xpad_disconnect(struct usb_interface *intf)
 	xpad_deinit_output(xpad);
 
 	usb_free_urb(xpad->irq_in);
-	usb_free_coherent(xpad->udev, XPAD_PKT_LEN,
-			xpad->idata, xpad->idata_dma);
-
 	usb_free_urb(xpad->ctrl_in);
 	usb_free_urb(xpad->ctrl_out);
 	usb_free_urb(xpad->bulk_in);
 	usb_free_urb(xpad->bulk_out);
+
+	kfree(xpad->ctrl_isetup);
+	kfree(xpad->ctrl_osetup);
+	usb_free_coherent(xpad->udev, XPAD_PKT_LEN, xpad->idata, xpad->idata_dma);
+	usb_free_coherent(xpad->udev, XONEW_CTRL_LEN, xpad->ctrl_idata, xpad->ctrl_idata_dma);
+	usb_free_coherent(xpad->udev, XONEW_CTRL_LEN, xpad->ctrl_odata, xpad->ctrl_odata_dma);
+	usb_free_coherent(xpad->udev, XONEW_BULK_LEN, xpad->bulk_idata, xpad->bulk_idata_dma);
+	usb_free_coherent(xpad->udev, XONEW_BULK_LEN, xpad->bulk_odata, xpad->bulk_odata_dma);
 
 	kfree(xpad);
 
