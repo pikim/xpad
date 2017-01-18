@@ -400,11 +400,18 @@ struct usb_xpad {
 	struct work_struct work;	/* init/remove device from callback */
 
 	int start_init_onew;		/* int to start the init sequence */
-	struct urb *cb_urb;			/* urb for control & bulk report */
-	unsigned char *cb_data;		/* control & bulk data */
+	struct urb *cb_urb;			/* urb for init control & bulk reports */
+	unsigned char *cb_data;		/* init control & bulk data */
 	dma_addr_t cb_data_dma;
-	struct usb_anchor cb_anchor;
+	struct usb_anchor xonew_anchor;
 	struct usb_ctrlrequest *ctrl_setup;	/* control setup packet */
+
+	struct urb *bi1_urb;			/* urb for bulk in report #1 */
+	unsigned char *bi1_data;		/* bulk data #1 */
+	dma_addr_t bi1_data_dma;
+	struct urb *bi2_urb;			/* urb for bulk in report #2 */
+	unsigned char *bi2_data;		/* bulk data #2 */
+	dma_addr_t bi2_data_dma;
 };
 
 static int xpad_init_input(struct usb_xpad *xpad);
@@ -938,10 +945,10 @@ static void xpad_stop_output(struct usb_xpad *xpad)
 	}
 
 	if (xpad->xtype == XTYPE_XBOXONEW) {
-		if (!usb_wait_anchor_empty_timeout(&xpad->cb_anchor, 5000)) {
+		if (!usb_wait_anchor_empty_timeout(&xpad->xonew_anchor, 5000)) {
 			dev_warn(&xpad->intf->dev,
 				 "timed out waiting for output URB to complete, killing\n");
-			usb_kill_anchored_urbs(&xpad->cb_anchor);
+			usb_kill_anchored_urbs(&xpad->xonew_anchor);
 		}
 	}
 }
@@ -1063,6 +1070,7 @@ struct xonew_cfg {
 };
 
 #include "xonew_init.c"
+#define XONEW_BI_LEN 0x800
 #define XONEW_CB_LEN 0x4000
 
 static char char2int(char input)
@@ -1085,6 +1093,32 @@ static unsigned long hex2bytes(const char input[], unsigned char* output)
 		*(output + i) = char2int(input[i*2])*16 + char2int(input[i*2+1]);
 	}
 	return hex_length;
+}
+
+static void xpadonew_process_packet(struct urb *urb)
+{
+	struct usb_xpad *xpad = urb->context;
+
+	if (urb->status &&
+		!(urb->status == -ENOENT ||
+		  urb->status == -ECONNRESET ||
+		  urb->status == -ESHUTDOWN)) {
+		dev_dbg(&xpad->intf->dev, "%s - nonzero bulk in status received: %d",
+		__func__, urb->status);
+	}
+
+	if (urb->status != -ESHUTDOWN) {
+dev_dbg(&xpad->intf->dev, "%s - data received.", __func__);
+
+		usb_fill_bulk_urb(urb, urb->dev, urb->pipe,
+				urb->transfer_buffer, urb->transfer_buffer_length,
+				urb->complete, urb->context);
+
+		if (usb_submit_urb(urb, GFP_ATOMIC)) {
+			usb_unanchor_urb(urb);
+			dev_err(&xpad->intf->dev, "%s - IO error.\n", __func__);
+		}
+	}
 }
 
 static void xpad_init_xbox_onew(struct urb *urb)
@@ -1147,7 +1181,7 @@ static void xpad_init_xbox_onew(struct urb *urb)
 				xpad_init_xbox_onew, xpad);
 		xpad->cb_urb->transfer_dma = xpad->cb_data_dma;
 		xpad->cb_urb->transfer_flags |= URB_NO_TRANSFER_DMA_MAP;
-		usb_anchor_urb(xpad->cb_urb, &xpad->cb_anchor);
+		usb_anchor_urb(xpad->cb_urb, &xpad->xonew_anchor);
 		if (usb_submit_urb(xpad->cb_urb, GFP_ATOMIC)) {
 			usb_unanchor_urb(xpad->cb_urb);
 			dev_err(&xpad->intf->dev, "%s - IO error.\n", __func__);
@@ -1155,23 +1189,23 @@ static void xpad_init_xbox_onew(struct urb *urb)
 	}
 	else if (PIPE_BULK == xonew_cfg[idx].transfer_type) { /* bulk transfer */
 		if (USB_DIR_IN & xonew_cfg[idx].endpoint) { /* in */
-			pipe = usb_rcvbulkpipe(xpad->udev, xonew_cfg[idx].endpoint & ~USB_DIR_IN);
+			/* bulk inputs are handled in xpadonew_process_packet */
 		}
 		else { /* out */
 			len = hex2bytes(xonew_cfg[idx].data, xpad->cb_data);
 
 			pipe = usb_sndbulkpipe(xpad->udev, xonew_cfg[idx].endpoint & ~USB_DIR_IN);
-		}
 
-		usb_fill_bulk_urb(xpad->cb_urb, xpad->udev, pipe,
-				xpad->cb_data, xonew_cfg[idx].length,
-				xpad_init_xbox_onew, xpad);
-		xpad->cb_urb->transfer_dma = xpad->cb_data_dma;
-		xpad->cb_urb->transfer_flags |= URB_NO_TRANSFER_DMA_MAP;
-		usb_anchor_urb(xpad->cb_urb, &xpad->cb_anchor);
-		if (usb_submit_urb(xpad->cb_urb, GFP_ATOMIC)) {
-			usb_unanchor_urb(xpad->cb_urb);
-			dev_err(&xpad->intf->dev, "%s - IO error.\n", __func__);
+			usb_fill_bulk_urb(xpad->cb_urb, xpad->udev, pipe,
+					xpad->cb_data, xonew_cfg[idx].length,
+					xpad_init_xbox_onew, xpad);
+			xpad->cb_urb->transfer_dma = xpad->cb_data_dma;
+			xpad->cb_urb->transfer_flags |= URB_NO_TRANSFER_DMA_MAP;
+			usb_anchor_urb(xpad->cb_urb, &xpad->xonew_anchor);
+			if (usb_submit_urb(xpad->cb_urb, GFP_ATOMIC)) {
+				usb_unanchor_urb(xpad->cb_urb);
+				dev_err(&xpad->intf->dev, "%s - IO error.\n", __func__);
+			}
 		}
 	}
 	else { /* this is the end */
@@ -1181,42 +1215,67 @@ static void xpad_init_xbox_onew(struct urb *urb)
 
 static int xpad_start_xbox_onew(struct usb_xpad *xpad)
 {
-	int error;
-
 	/* allocate memory for setup data */
 	xpad->ctrl_setup = kmalloc(sizeof(struct usb_ctrlrequest), GFP_ATOMIC);
 	if (!xpad->ctrl_setup) {
-		error = -ENOMEM;
-		goto err_free_mem;
+		dev_err(&xpad->intf->dev, "%s - kmalloc.\n", __func__);
+		return -ENOMEM;
 	}
+
 	/* allocate memory for data */
 	xpad->cb_data = usb_alloc_coherent(xpad->udev, XONEW_CB_LEN,
 					 GFP_ATOMIC, &xpad->cb_data_dma);
-	if (!xpad->cb_data) {
-		error = -ENOMEM;
-		goto err_free_mem;
-	}
-	/* allocate urb */
-	xpad->cb_urb = usb_alloc_urb(0, GFP_ATOMIC);
-	if (!xpad->cb_urb) {
-		error = -ENOMEM;
-		goto err_free_urbs;
+	xpad->bi1_data = usb_alloc_coherent(xpad->udev, XONEW_BI_LEN,
+					 GFP_ATOMIC, &xpad->bi1_data_dma);
+	xpad->bi2_data = usb_alloc_coherent(xpad->udev, XONEW_BI_LEN,
+					 GFP_ATOMIC, &xpad->bi2_data_dma);
+	if (!(xpad->cb_data && xpad->bi1_data && xpad->bi2_data)) {
+		dev_err(&xpad->intf->dev, "%s - usb_alloc_coherent.\n", __func__);
+		return -ENOMEM;
 	}
 
-	init_usb_anchor(&xpad->cb_anchor);
+	/* allocate urb */
+	xpad->cb_urb = usb_alloc_urb(0, GFP_ATOMIC);
+	xpad->bi1_urb = usb_alloc_urb(0, GFP_ATOMIC);
+	xpad->bi2_urb = usb_alloc_urb(0, GFP_ATOMIC);
+	if (!(xpad->cb_urb && xpad->bi1_urb && xpad->bi2_urb)) {
+		dev_err(&xpad->intf->dev, "%s - usb_alloc_urb.\n", __func__);
+		return -ENOMEM;
+	}
+
+	init_usb_anchor(&xpad->xonew_anchor);
+
+	usb_fill_bulk_urb(xpad->bi1_urb, xpad->udev,
+			usb_rcvbulkpipe(xpad->udev, 4),
+			xpad->bi1_data, XONEW_BI_LEN,
+			xpadonew_process_packet, xpad);
+	xpad->bi1_urb->transfer_dma = xpad->bi1_data_dma;
+	xpad->bi1_urb->transfer_flags |= URB_NO_TRANSFER_DMA_MAP;
+
+	usb_anchor_urb(xpad->bi1_urb, &xpad->xonew_anchor);
+	if (usb_submit_urb(xpad->bi1_urb, GFP_ATOMIC)) {
+		usb_unanchor_urb(xpad->bi1_urb);
+		dev_err(&xpad->intf->dev, "%s - IO error.\n", __func__);
+	}
+
+	usb_fill_bulk_urb(xpad->bi2_urb, xpad->udev,
+			usb_rcvbulkpipe(xpad->udev, 5),
+			xpad->bi2_data, XONEW_BI_LEN,
+			xpadonew_process_packet, xpad);
+	xpad->bi2_urb->transfer_dma = xpad->bi2_data_dma;
+	xpad->bi2_urb->transfer_flags |= URB_NO_TRANSFER_DMA_MAP;
+
+	usb_anchor_urb(xpad->bi2_urb, &xpad->xonew_anchor);
+	if (usb_submit_urb(xpad->bi2_urb, GFP_ATOMIC)) {
+		usb_unanchor_urb(xpad->bi2_urb);
+		dev_err(&xpad->intf->dev, "%s - IO error.\n", __func__);
+	}
 
 	/* set context (could also be done with usb_fill_xxx_urb) */
 	xpad->cb_urb->context = xpad;
 
 	xpad_init_xbox_onew(xpad->cb_urb);
 	return 0;
-
-err_free_urbs:
-	dev_err(&xpad->intf->dev, "%s - err_free_urbs.\n", __func__);
-	return error;
-err_free_mem:
-	dev_err(&xpad->intf->dev, "%s - err_free_mem.\n", __func__);
-	return error;
 }
 
 #ifdef CONFIG_JOYSTICK_XPAD_FF
@@ -1498,6 +1557,8 @@ static int xpad_start_input(struct usb_xpad *xpad)
 		if (error) {
 			/* xpad->irq_in not used wirelessly */
 			usb_kill_urb(xpad->cb_urb);
+			usb_kill_urb(xpad->bi1_urb);
+			usb_kill_urb(xpad->bi2_urb);
 			return error;
 		}
 	}
@@ -1509,6 +1570,8 @@ static void xpad_stop_input(struct usb_xpad *xpad)
 {
 	usb_kill_urb(xpad->irq_in);
 	usb_kill_urb(xpad->cb_urb);
+	usb_kill_urb(xpad->bi1_urb);
+	usb_kill_urb(xpad->bi2_urb);
 }
 
 static void xpad360w_poweroff_controller(struct usb_xpad *xpad)
@@ -1867,10 +1930,14 @@ err_deinit_output:
 err_free_in_urb:
 	usb_free_urb(xpad->irq_in);
 	usb_free_urb(xpad->cb_urb);
+	usb_free_urb(xpad->bi1_urb);
+	usb_free_urb(xpad->bi2_urb);
 	dev_err(&xpad->intf->dev, "%s - err_free_in_urb.\n", __func__);
 err_free_idata:
 	usb_free_coherent(udev, XPAD_PKT_LEN, xpad->idata, xpad->idata_dma);
 	usb_free_coherent(udev, XONEW_CB_LEN, xpad->cb_data, xpad->cb_data_dma);
+	usb_free_coherent(udev, XONEW_BI_LEN, xpad->bi1_data, xpad->bi1_data_dma);
+	usb_free_coherent(udev, XONEW_BI_LEN, xpad->bi2_data, xpad->bi2_data_dma);
 	kfree(xpad->ctrl_setup);
 	dev_err(&intf->dev, "%s - err_free_idata.\n", __func__);
 err_free_mem:
@@ -1900,9 +1967,13 @@ static void xpad_disconnect(struct usb_interface *intf)
 
 	usb_free_urb(xpad->irq_in);
 	usb_free_urb(xpad->cb_urb);
+	usb_free_urb(xpad->bi1_urb);
+	usb_free_urb(xpad->bi2_urb);
 
 	usb_free_coherent(xpad->udev, XPAD_PKT_LEN, xpad->idata, xpad->idata_dma);
 	usb_free_coherent(xpad->udev, XONEW_CB_LEN, xpad->cb_data, xpad->cb_data_dma);
+	usb_free_coherent(xpad->udev, XONEW_BI_LEN, xpad->bi1_data, xpad->bi1_data_dma);
+	usb_free_coherent(xpad->udev, XONEW_BI_LEN, xpad->bi2_data, xpad->bi2_data_dma);
 
 	kfree(xpad->ctrl_setup);
 	kfree(xpad);
