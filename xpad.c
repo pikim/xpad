@@ -1090,21 +1090,18 @@ static unsigned long hex2bytes(const char input[], unsigned char* output)
 static void xpad_init_xbox_onew(struct urb *urb)
 {
 	static int idx; /* to address the init config array */
-	static unsigned char exp_ctrl_data[64]; /* expected control data, observed max-length 36 */
 	struct usb_xpad *xpad = urb->context;
-	int len, i;
+	unsigned char exp_ctrl_data[64];
+	unsigned int pipe, len;
 
 	if (xpad->start_init_onew != 0) {
 		xpad->start_init_onew = 0;
 		idx = -1; /* minus one for first frame */
 	}
 
-	if (urb->status &&
-		!(urb->status == -ENOENT ||
-		  urb->status == -ECONNRESET ||
-		  urb->status == -ESHUTDOWN)) {
-		dev_dbg(&xpad->intf->dev, "%s - nonzero write bulk status received: %d",
-		__func__, urb->status);
+	if (urb->status) {
+		dev_dbg(&xpad->intf->dev, "%s - nonzero transmission status received: %d, %d",
+		__func__, idx, urb->status);
 	}
 
 	/* process data from last frame */
@@ -1114,22 +1111,18 @@ static void xpad_init_xbox_onew(struct urb *urb)
 			if (USB_DIR_IN & xonew_cfg[idx].endpoint) { /* in */
 				len = hex2bytes(xonew_cfg[idx].data, exp_ctrl_data);
 
-				for (i = 0; i < len; i++) {
-					if (exp_ctrl_data[i] != xpad->cb_data[i]) {
-						dev_info(&xpad->intf->dev,
-								"%s - expected result did not match at message #%d.\n",
-								__func__, idx);
-						dev_info(&xpad->intf->dev, "Expected: %s\n", exp_ctrl_data);
-						dev_info(&xpad->intf->dev, "Received: %s\n", xpad->cb_data);
-						i = len; /* to exit loop (break would also do) */
-					}
+				if (memcmp(exp_ctrl_data, xpad->cb_data, len)) {
+					dev_info(&xpad->intf->dev,
+							"%s - expected result did not match at message #%d.\n",
+							__func__, idx);
+					dev_info(&xpad->intf->dev, "Expected: %s\n", exp_ctrl_data);
+					dev_info(&xpad->intf->dev, "Received: %s\n", xpad->cb_data);
 				}
 			}
 		}
 	}
 
 	idx++;
-dev_dbg(&xpad->intf->dev, "%s - index %d", __func__, idx);
 
 	/* prepare and send next frame */
 	if (PIPE_CONTROL == xonew_cfg[idx].transfer_type) { /* control transfer */
@@ -1141,20 +1134,17 @@ dev_dbg(&xpad->intf->dev, "%s - index %d", __func__, idx);
 		xpad->ctrl_setup->wLength = xonew_cfg[idx].length;
 
 		if (USB_DIR_IN & xonew_cfg[idx].endpoint) { /* in */
-			usb_fill_control_urb(xpad->cb_urb, xpad->udev,
-					usb_rcvctrlpipe(xpad->udev, xonew_cfg[idx].endpoint & ~USB_DIR_IN),
-					(void *)xpad->ctrl_setup, xpad->cb_data, xonew_cfg[idx].length,
-					xpad_init_xbox_onew, xpad);
+			pipe = usb_rcvctrlpipe(xpad->udev, xonew_cfg[idx].endpoint & ~USB_DIR_IN);
 		}
 		else { /* out */
 			len = hex2bytes(xonew_cfg[idx].data, xpad->cb_data);
 
-			usb_fill_control_urb(xpad->cb_urb, xpad->udev,
-					usb_sndctrlpipe(xpad->udev, xonew_cfg[idx].endpoint & ~USB_DIR_IN),
-					(void *)xpad->ctrl_setup, xpad->cb_data, xonew_cfg[idx].length,
-					xpad_init_xbox_onew, xpad);
+			pipe = usb_sndctrlpipe(xpad->udev, xonew_cfg[idx].endpoint & ~USB_DIR_IN);
 		}
 
+		usb_fill_control_urb(xpad->cb_urb, xpad->udev, pipe,
+				(void *)xpad->ctrl_setup, xpad->cb_data, xonew_cfg[idx].length,
+				xpad_init_xbox_onew, xpad);
 		xpad->cb_urb->transfer_dma = xpad->cb_data_dma;
 		xpad->cb_urb->transfer_flags |= URB_NO_TRANSFER_DMA_MAP;
 		usb_anchor_urb(xpad->cb_urb, &xpad->cb_anchor);
@@ -1165,20 +1155,17 @@ dev_dbg(&xpad->intf->dev, "%s - index %d", __func__, idx);
 	}
 	else if (PIPE_BULK == xonew_cfg[idx].transfer_type) { /* bulk transfer */
 		if (USB_DIR_IN & xonew_cfg[idx].endpoint) { /* in */
-			usb_fill_bulk_urb(xpad->cb_urb, xpad->udev,
-					usb_rcvbulkpipe(xpad->udev, xonew_cfg[idx].endpoint & ~USB_DIR_IN),
-					xpad->cb_data, xonew_cfg[idx].length,
-					xpad_init_xbox_onew, xpad);
+			pipe = usb_rcvbulkpipe(xpad->udev, xonew_cfg[idx].endpoint & ~USB_DIR_IN);
 		}
 		else { /* out */
 			len = hex2bytes(xonew_cfg[idx].data, xpad->cb_data);
 
-			usb_fill_bulk_urb(xpad->cb_urb, xpad->udev,
-					usb_sndbulkpipe(xpad->udev, xonew_cfg[idx].endpoint & ~USB_DIR_IN),
-					xpad->cb_data, xonew_cfg[idx].length,
-					xpad_init_xbox_onew, xpad);
+			pipe = usb_sndbulkpipe(xpad->udev, xonew_cfg[idx].endpoint & ~USB_DIR_IN);
 		}
 
+		usb_fill_bulk_urb(xpad->cb_urb, xpad->udev, pipe,
+				xpad->cb_data, xonew_cfg[idx].length,
+				xpad_init_xbox_onew, xpad);
 		xpad->cb_urb->transfer_dma = xpad->cb_data_dma;
 		xpad->cb_urb->transfer_flags |= URB_NO_TRANSFER_DMA_MAP;
 		usb_anchor_urb(xpad->cb_urb, &xpad->cb_anchor);
